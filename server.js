@@ -18,6 +18,8 @@ const PORT = process.env.PORT || 4000;
 const RUNWAY_API_BASE = process.env.RUNWAY_API_BASE || "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_KEY = process.env.RUNWAY_API_KEY;
 const RUNWAY_API_VERSION = process.env.RUNWAY_API_VERSION || "2024-11-06";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_BASE = process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1beta";
 
 // simple in-memory job tracking
 const jobs = {};
@@ -132,6 +134,27 @@ const ENGINE_CONFIG = {
     defaultModel: "sora-2",
     sizes: ["1280x720", "720x1280", "1792x1024", "1024x1792"],
     defaultSize: "1280x720",
+    allowsReferenceImage: true,
+  },
+  "gemini-api": {
+    label: "Gemini API - Veo",
+    provider: "gemini",
+    apiModel: "veo-3.1-generate-preview",
+    supportsSeed: false,
+    minLength: 4,
+    maxLength: 8,
+    defaultLength: 8,
+    allowedDurations: [4, 6, 8],
+    models: [
+      "veo-3.1-generate-preview",
+      "veo-3.1-fast-generate-preview",
+      "veo-3.0-generate-001",
+      "veo-3.0-fast-generate-001",
+      "veo-2.0-generate-001",
+    ],
+    defaultModel: "veo-3.1-generate-preview",
+    sizes: ["720p", "1080p"],
+    defaultSize: "720p",
     allowsReferenceImage: true,
   },
 };
@@ -424,11 +447,18 @@ app.post("/api/generate", async (req, res) => {
       aspectRatio,
       seed,
       lengthSeconds,
+      duration, // Accept duration as alias for lengthSeconds
       promptImage,
       model: requestedModel,
       size: requestedSize,
+      resolution, // Accept resolution as alias for size
       promptImageName,
     } = req.body;
+
+    // Use duration if provided, otherwise fall back to lengthSeconds
+    const effectiveLength = duration !== undefined ? duration : lengthSeconds;
+    // Use resolution if provided, otherwise fall back to requestedSize
+    const effectiveSize = resolution !== undefined ? resolution : requestedSize;
 
     console.log("Received /api/generate request:", {
       engineId,
@@ -452,7 +482,7 @@ app.post("/api/generate", async (req, res) => {
       return res.status(400).json({ error: "Prompt required" });
     }
 
-    if (!aspectRatio && engine.provider !== "openai") {
+    if (!aspectRatio && engine.provider !== "openai" && engine.provider !== "gemini") {
       console.warn("Aspect ratio is required for engine:", engineId);
       return res.status(400).json({ error: "Aspect ratio required" });
     }
@@ -461,8 +491,8 @@ app.post("/api/generate", async (req, res) => {
     const maxLength = engine.maxLength ?? 20;
     const defaultLength = engine.defaultLength ?? minLength;
     const numericLength =
-      typeof lengthSeconds === "number" && Number.isFinite(lengthSeconds)
-        ? Math.round(lengthSeconds)
+      typeof effectiveLength === "number" && Number.isFinite(effectiveLength)
+        ? Math.round(effectiveLength)
         : defaultLength;
 
     if (numericLength < minLength || numericLength > maxLength) {
@@ -680,6 +710,135 @@ app.post("/api/generate", async (req, res) => {
         remoteStatus: normalized.status || null,
         error: normalized.error || null,
         referenceImageName: referenceImage ? referenceImage.filename : null,
+      };
+    } else if (engine.provider === "gemini") {
+      if (!GEMINI_API_KEY) {
+        console.error("Missing GEMINI_API_KEY in environment for Gemini request.");
+        return res.status(500).json({ error: "Gemini API key not configured" });
+      }
+
+      const allowedModels = Array.isArray(engine.models) && engine.models.length
+        ? engine.models
+        : ["veo-3.1-generate-preview"];
+      const defaultModel = engine.defaultModel || allowedModels[0];
+      const requestedModelClean =
+        typeof requestedModel === "string" ? requestedModel.trim() : "";
+      const selectedModel = allowedModels.includes(requestedModelClean)
+        ? requestedModelClean
+        : defaultModel;
+
+      const resolution = typeof effectiveSize === "string" && effectiveSize.trim()
+        ? effectiveSize.trim()
+        : engine.defaultSize || "720p";
+
+      // Map resolution to Gemini format (720p -> "720p", 1080p -> "1080p")
+      const geminiResolution = resolution === "1080p" ? "1080p" : "720p";
+
+      // Get aspect ratio (default to 16:9 if not provided)
+      const geminiAspectRatio = typeof aspectRatio === "string" && aspectRatio.trim()
+        ? aspectRatio.trim()
+        : "16:9";
+
+      // Parse reference image if provided
+      const referenceImageName =
+        typeof promptImageName === "string" && promptImageName.trim()
+          ? promptImageName.trim()
+          : "input-reference";
+      const referenceImage = engine.allowsReferenceImage && promptImage
+        ? parseSoraReferenceImage(promptImage, referenceImageName)
+        : null;
+
+      // Build Gemini API payload
+      // According to Gemini API docs, the instances array should only contain prompt and optionally image
+      const geminiPayload = {
+        instances: [
+          {
+            prompt: prompt.trim(),
+          },
+        ],
+      };
+
+      // Add image if provided (image-to-video)
+      if (referenceImage) {
+        // Convert image buffer to base64
+        const base64Image = referenceImage.buffer.toString("base64");
+        const mimeType = referenceImage.mimeType || "image/png";
+        geminiPayload.instances[0].image = {
+          bytesBase64Encoded: base64Image,
+          mimeType: mimeType,
+        };
+      }
+
+      const endpoint = `${GEMINI_API_BASE}/models/${selectedModel}:predictLongRunning`;
+
+      console.log("Making API call to Gemini for video generation:", {
+        endpoint,
+        model: selectedModel,
+        aspectRatio: geminiAspectRatio,
+        resolution: geminiResolution,
+        duration: numericLength,
+        hasImage: !!referenceImage,
+      });
+
+      let response;
+      try {
+        response = await axios.post(
+          endpoint,
+          geminiPayload,
+          {
+            headers: {
+              "x-goog-api-key": GEMINI_API_KEY,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+      } catch (error) {
+        console.error(
+          "Gemini video generation error:",
+          error.response?.data || error.message
+        );
+        const message =
+          error.response?.data?.error?.message ||
+          error.response?.data?.message ||
+          error.message ||
+          "Gemini video generation failed";
+        const status = error.response?.status || 502;
+        return res.status(status).json({ error: message });
+      }
+
+      // Gemini returns an operation name in the format "operations/{operation_id}"
+      const operationName = response.data?.name;
+      if (!operationName) {
+        console.error("Gemini API did not return an operation name:", response.data);
+        return res.status(502).json({ error: "Missing operation name from provider" });
+      }
+
+      // Extract just the operation ID for storage (remove "operations/" prefix if present)
+      const operationId = operationName.includes("/") 
+        ? operationName.split("/").pop() 
+        : operationName;
+
+      console.log("Gemini API responded with operation name:", operationName, "operation ID:", operationId);
+
+      jobRecord = {
+        id: operationId,
+        engineId,
+        prompt,
+        aspectRatio: geminiAspectRatio,
+        seed: null,
+        status: "queued",
+        createdAt: new Date().toISOString(),
+        localPath: null,
+        videoUrl: null,
+        lengthSeconds: numericLength,
+        provider: engine.provider,
+        model: selectedModel,
+        size: geminiResolution,
+        thumbnailUrl: null,
+        remoteStatus: null,
+        error: null,
+        referenceImageName: referenceImage ? referenceImage.filename : null,
+        geminiOperationName: operationName, // Store full operation name for polling
       };
     } else {
       const input = {
@@ -956,6 +1115,101 @@ app.get("/api/status/:jobId", async (req, res) => {
         console.log("Video download complete for job:", jobId);
       }
 
+      return res.json(job);
+    }
+
+    if (job.provider === "gemini") {
+      if (!GEMINI_API_KEY) {
+        console.error("Missing GEMINI_API_KEY when polling Gemini status.");
+        return res.status(500).json({ error: "Gemini API key not configured" });
+      }
+
+      // Gemini uses operation names for polling
+      // Use stored operation name or construct from job ID
+      const operationName = job.geminiOperationName || 
+        (jobId.startsWith("operations/") ? jobId : `operations/${jobId}`);
+      const statusUrl = `${GEMINI_API_BASE}/${operationName}`;
+
+      console.log("Polling Gemini API for operation status:", operationName, "via", statusUrl);
+      
+      let response;
+      try {
+        response = await axios.get(statusUrl, {
+          headers: {
+            "x-goog-api-key": GEMINI_API_KEY,
+          },
+        });
+      } catch (error) {
+        console.error("Gemini polling error:", error.response?.data || error.message);
+        const message =
+          error.response?.data?.error?.message ||
+          error.response?.data?.message ||
+          error.message ||
+          "Gemini polling failed";
+        const status = error.response?.status || 502;
+        return res.status(status).json({ error: message });
+      }
+
+      const data = response.data;
+      console.log("Gemini API status response for operation", operationName + ":", data);
+
+      // Map Gemini operation status to our status
+      const isDone = data.done === true;
+      let status = "queued";
+      if (isDone) {
+        if (data.error) {
+          status = "failed";
+          job.error = data.error.message || JSON.stringify(data.error);
+        } else {
+          status = "succeeded";
+        }
+      } else {
+        status = "running";
+      }
+
+      job.status = status;
+      job.remoteStatus = isDone ? "completed" : "in_progress";
+
+      // Extract video URL from response when done
+      if (isDone && status === "succeeded" && !job.videoUrl) {
+        const responseData = data.response;
+        if (responseData?.generateVideoResponse?.generatedSamples) {
+          const samples = responseData.generateVideoResponse.generatedSamples;
+          if (Array.isArray(samples) && samples.length > 0) {
+            const video = samples[0].video;
+            if (video?.uri) {
+              job.videoUrl = video.uri;
+            }
+          }
+        }
+      }
+
+      // Download video when succeeded
+      if (status === "succeeded" && job.videoUrl && !job.localPath) {
+        const dir = path.join(
+          DOWNLOAD_DIR,
+          job.engineId,
+          slugify(job.prompt),
+          (job.size || job.aspectRatio || "unknown").replace(/[^a-z0-9]+/gi, "_")
+        );
+        console.log("Creating download directory:", dir);
+        fs.mkdirSync(dir, { recursive: true });
+
+        const filename = `${job.engineId}_${Date.now()}.mp4`;
+        const fullPath = path.join(dir, filename);
+        console.log("Downloading video from", job.videoUrl, "to", fullPath);
+        
+        try {
+          await downloadFile(job.videoUrl, fullPath);
+          job.localPath = fullPath;
+          console.log("Video download complete for job:", jobId);
+        } catch (downloadError) {
+          console.error("Failed to download Gemini video:", downloadError);
+          // Continue without local path
+        }
+      }
+
+      job.gemini = data;
       return res.json(job);
     }
 

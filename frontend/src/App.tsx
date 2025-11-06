@@ -50,7 +50,7 @@ type Job = {
   referenceImageName?: string | null;
 };
 
-type ProviderId = "runway-gen3" | "pollo" | "fal-ai" | "sora-2";
+type ProviderId = "runway-gen3" | "pollo" | "fal-ai" | "sora-2" | "gemini-api";
 type ProviderStatus = "connected" | "beta" | "coming-soon" | "waitlist";
 
 type Provider = {
@@ -140,6 +140,22 @@ const PROVIDERS: Provider[] = [
     ],
     status: "connected",
   },
+  {
+    id: "gemini-api",
+    name: "Gemini API",
+    summary: "Google's Veo 3.1 and Veo 3 video generation models.",
+    tagline:
+      "Generate high-fidelity 8-second videos with native audio using Veo models.",
+    details:
+      "Set GEMINI_API_KEY in the backend .env. This panel supports Veo 3.1 and Veo 3 models for text-to-video and image-to-video generation. Veo 3.1 generates 8-second 720p or 1080p videos with native audio. Supports durations: 4s, 6s, and 8s.",
+    docs: [
+      {
+        label: "Gemini API video docs",
+        url: "https://ai.google.dev/gemini-api/docs/video",
+      },
+    ],
+    status: "beta",
+  },
 ];
 
 export default function App() {
@@ -150,7 +166,8 @@ export default function App() {
     activeProvider !== "pollo" &&
     activeProvider !== "fal-ai" &&
     activeProvider !== "sora-2" &&
-    activeProvider !== "runway-gen3"
+    activeProvider !== "runway-gen3" &&
+    activeProvider !== "gemini-api"
       ? PROVIDERS.find((provider) => provider.id === activeProvider) ?? null
       : null;
 
@@ -174,6 +191,10 @@ export default function App() {
 
       {activeProvider === "runway-gen3" && (
         <RunwayPanel onBack={() => setActiveProvider(null)} />
+      )}
+
+      {activeProvider === "gemini-api" && (
+        <GeminiPanel onBack={() => setActiveProvider(null)} />
       )}
 
       {selectedProvider && (
@@ -1639,6 +1660,472 @@ function RunwayPanel({ onBack }: { onBack: () => void }) {
             {!sortedJobs.length && (
               <tr>
                 <td colSpan={8}>No jobs yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+    </>
+  );
+}
+
+function GeminiPanel({ onBack }: { onBack: () => void }) {
+  const [meta, setMeta] = useState<Meta>({ engines: [], aspectRatios: [] });
+  const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("veo-3.1-generate-preview");
+  const [duration, setDuration] = useState<number>(8);
+  const [resolution, setResolution] = useState("720p");
+  const [aspectRatio, setAspectRatio] = useState("16:9");
+  const [referenceImage, setReferenceImage] = useState<string>("");
+  const [referenceFileName, setReferenceFileName] = useState<string | null>(
+    null
+  );
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [polling, setPolling] = useState<Record<string, boolean>>({});
+  const [sortBy, setSortBy] = useState<keyof Job>("createdAt");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [generatingPromptFromImage, setGeneratingPromptFromImage] =
+    useState(false);
+
+  const GEMINI_MODELS = [
+    { value: "veo-3.1-generate-preview", label: "Veo 3.1 Preview" },
+    { value: "veo-3.1-fast-generate-preview", label: "Veo 3.1 Fast Preview" },
+    { value: "veo-3.0-generate-001", label: "Veo 3.0" },
+    { value: "veo-3.0-fast-generate-001", label: "Veo 3.0 Fast" },
+    { value: "veo-2.0-generate-001", label: "Veo 2.0" },
+  ];
+
+  const isVeo31 = model.startsWith("veo-3.1");
+  const isVeo3 = model.startsWith("veo-3.0");
+  const allowedDurations = isVeo31 ? [4, 6, 8] : isVeo3 ? [8] : [5, 6, 7, 8];
+  const allowedResolutions = isVeo31
+    ? ["720p", "1080p"]
+    : isVeo3
+    ? ["720p", "1080p"]
+    : ["720p"];
+
+  const refreshJobs = useCallback(() => {
+    fetch(`${API_BASE}/jobs`)
+      .then((r) => r.json())
+      .then((list: Job[]) => {
+        const filtered = list.filter(
+          (job) => job.engineId === "gemini-api" || job.provider === "gemini"
+        );
+        setJobs(filtered);
+      })
+      .catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/meta`)
+      .then((r) => r.json())
+      .then((data: Meta) => {
+        setMeta(data);
+        if (data.aspectRatios?.length) {
+          setAspectRatio(data.aspectRatios[0]);
+        }
+      })
+      .catch(console.error);
+
+    refreshJobs();
+  }, [refreshJobs]);
+
+  useEffect(() => {
+    // Reset duration when model changes
+    if (isVeo31) {
+      setDuration(8);
+    } else if (isVeo3) {
+      setDuration(8);
+    } else {
+      setDuration(8);
+    }
+  }, [model, isVeo31, isVeo3]);
+
+  const handleGenerate = async () => {
+    if (!prompt.trim()) {
+      alert("Enter a prompt");
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      engineId: "gemini-api",
+      prompt: prompt.trim(),
+      model,
+      duration,
+      resolution,
+      aspectRatio,
+    };
+
+    if (referenceImage) {
+      payload.promptImage = referenceImage;
+      if (referenceFileName) {
+        payload.promptImageName = referenceFileName;
+      }
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data?.error) {
+        alert(
+          typeof data.error === "string" ? data.error : "Generation failed"
+        );
+        return;
+      }
+      if (data?.jobId) {
+        setPrompt("");
+        startPolling(data.jobId);
+      }
+    } catch (error) {
+      console.error(error);
+      alert("Failed to submit request");
+    }
+  };
+
+  const startPolling = (jobId: string) => {
+    if (polling[jobId]) return;
+    setPolling((p) => ({ ...p, [jobId]: true }));
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/status/${jobId}`);
+        const job: Job = await res.json();
+        if (!job || (job as any).error) return;
+
+        setJobs((prev) => {
+          const map: Record<string, Job> = {};
+          [...prev, job]
+            .filter(
+              (entry) =>
+                entry.engineId === "gemini-api" || entry.provider === "gemini"
+            )
+            .forEach((entry) => {
+              map[entry.id] = entry;
+            });
+          return Object.values(map);
+        });
+
+        if (job.status === "queued" || job.status === "running") {
+          setTimeout(tick, 10000); // Poll every 10 seconds for Gemini
+        } else {
+          setPolling((p) => {
+            const next = { ...p };
+            delete next[jobId];
+            return next;
+          });
+          refreshJobs();
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    };
+
+    tick();
+  };
+
+  const handleReferenceFile = (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) {
+      setReferenceImage("");
+      setReferenceFileName(null);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === "string") {
+        setReferenceImage(reader.result);
+        setReferenceFileName(file.name);
+      } else {
+        setReferenceImage("");
+        setReferenceFileName(null);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const clearReference = () => {
+    setReferenceImage("");
+    setReferenceFileName(null);
+  };
+
+  const generatePromptFromImage = async () => {
+    if (!referenceImage) {
+      alert("Upload a reference image first");
+      return;
+    }
+
+    setGeneratingPromptFromImage(true);
+    try {
+      const res = await fetch(`${API_BASE}/image-to-text`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image: referenceImage,
+          provider: "openai",
+        }),
+      });
+
+      const data = await res.json();
+      if (data?.error) {
+        alert(data.error);
+        return;
+      }
+      if (data?.text) {
+        setPrompt(data.text);
+      }
+    } catch (error) {
+      console.error("Error generating prompt from image:", error);
+      alert("Failed to generate prompt from image");
+    } finally {
+      setGeneratingPromptFromImage(false);
+    }
+  };
+
+  const handleDurationChange = (value: number) => {
+    if (Number.isNaN(value)) return;
+    if (allowedDurations.includes(value)) {
+      setDuration(value);
+    }
+  };
+
+  const showPath = (p?: string | null) => {
+    if (!p) return;
+    alert(`Saved to:\n${p}`);
+  };
+
+  const openVideo = (url?: string | null) => {
+    if (!url) return;
+    window.open(url, "_blank", "noopener");
+  };
+
+  const sortedJobs = useMemo(() => {
+    const mult = sortDir === "asc" ? 1 : -1;
+    return [...jobs].sort((a, b) => {
+      if (sortBy === "createdAt") {
+        return (
+          mult *
+          (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        );
+      }
+      const avRaw = (a as Record<string, unknown>)[sortBy];
+      const bvRaw = (b as Record<string, unknown>)[sortBy];
+      if (typeof avRaw === "number" && typeof bvRaw === "number") {
+        return mult * (avRaw - bvRaw);
+      }
+      const av = String(avRaw ?? "");
+      const bv = String(bvRaw ?? "");
+      return mult * av.localeCompare(bv, undefined, { numeric: true });
+    });
+  }, [jobs, sortBy, sortDir]);
+
+  const setSortField = (field: keyof Job) => {
+    if (field === sortBy) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortBy(field);
+      setSortDir("asc");
+    }
+  };
+
+  return (
+    <>
+      <div className="view-header">
+        <button className="back-link" onClick={onBack}>
+          Back to Providers
+        </button>
+        <div>
+          <h1>Gemini API - Veo</h1>
+          <p className="view-subtitle">
+            Generate videos with Veo 3.1 and Veo 3 models. Allowed durations:{" "}
+            {allowedDurations.join(", ")} seconds.
+          </p>
+        </div>
+      </div>
+
+      <section className="form">
+        <div className="field">
+          <label>Model</label>
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            {GEMINI_MODELS.map((entry) => (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field">
+          <label>Aspect Ratio</label>
+          <select
+            value={aspectRatio}
+            onChange={(e) => setAspectRatio(e.target.value)}
+          >
+            {meta.aspectRatios.length ? (
+              meta.aspectRatios.map((ratio) => (
+                <option key={ratio} value={ratio}>
+                  {ratio}
+                </option>
+              ))
+            ) : (
+              <>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16</option>
+                <option value="1:1">1:1</option>
+              </>
+            )}
+          </select>
+        </div>
+
+        <div className="field">
+          <label>Resolution</label>
+          <select
+            value={resolution}
+            onChange={(e) => setResolution(e.target.value)}
+          >
+            {allowedResolutions.map((res) => (
+              <option key={res} value={res}>
+                {res}
+              </option>
+            ))}
+          </select>
+          <p className="length-hint">
+            Veo 3.1 supports 720p and 1080p. Veo 3 supports 720p and 1080p (16:9
+            only).
+          </p>
+        </div>
+
+        <div className="field">
+          <label>Duration (seconds)</label>
+          <select
+            value={duration}
+            onChange={(e) => handleDurationChange(Number(e.target.value))}
+          >
+            {allowedDurations.map((dur) => (
+              <option key={dur} value={dur}>
+                {dur}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field span-2">
+          <label>Prompt</label>
+          <textarea
+            rows={4}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Describe the scene, motion, camera, and mood. Veo supports dialogue and sound effects in prompts."
+          />
+        </div>
+
+        <div className="field">
+          <label>Reference Image (optional)</label>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => handleReferenceFile(e.target.files)}
+          />
+          {referenceFileName ? (
+            <>
+              <p className="length-hint">Using {referenceFileName}</p>
+              <div
+                style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}
+              >
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={generatePromptFromImage}
+                  disabled={generatingPromptFromImage}
+                >
+                  {generatingPromptFromImage
+                    ? "Generating..."
+                    : "Generate Prompt from Image"}
+                </button>
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={clearReference}
+                >
+                  Remove image
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="length-hint">
+              Optional reference image for image-to-video generation. PNG or JPG
+              recommended.
+            </p>
+          )}
+        </div>
+
+        <button onClick={handleGenerate}>Generate {duration}s Video</button>
+      </section>
+
+      <section className="jobs">
+        <div className="jobs-header">
+          <h2>Jobs</h2>
+          <button onClick={refreshJobs}>Refresh</button>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th onClick={() => setSortField("model")}>Model</th>
+              <th onClick={() => setSortField("aspectRatio")}>Aspect</th>
+              <th onClick={() => setSortField("size")}>Resolution</th>
+              <th onClick={() => setSortField("lengthSeconds")}>Seconds</th>
+              <th onClick={() => setSortField("status")}>Status</th>
+              <th onClick={() => setSortField("remoteStatus")}>Remote</th>
+              <th onClick={() => setSortField("prompt")}>Prompt</th>
+              <th onClick={() => setSortField("createdAt")}>Created</th>
+              <th>Assets</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedJobs.map((job) => (
+              <tr key={job.id}>
+                <td>{job.model ?? model}</td>
+                <td>{job.aspectRatio ?? aspectRatio ?? "-"}</td>
+                <td>{job.size ?? resolution ?? "-"}</td>
+                <td>{job.lengthSeconds ?? duration ?? "-"}</td>
+                <td>{job.status}</td>
+                <td>{job.remoteStatus ?? "-"}</td>
+                <td title={job.prompt}>
+                  {job.prompt.length > 48
+                    ? `${job.prompt.slice(0, 48)}...`
+                    : job.prompt}
+                </td>
+                <td>{new Date(job.createdAt).toLocaleTimeString()}</td>
+                <td>
+                  <div className="sora-asset-actions">
+                    {job.localPath ? (
+                      <button onClick={() => showPath(job.localPath)}>
+                        Show path
+                      </button>
+                    ) : (
+                      <span>Pending</span>
+                    )}
+                    {job.videoUrl ? (
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => openVideo(job.videoUrl)}
+                      >
+                        Open
+                      </button>
+                    ) : null}
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!sortedJobs.length && (
+              <tr>
+                <td colSpan={9}>No Gemini jobs yet.</td>
               </tr>
             )}
           </tbody>
