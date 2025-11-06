@@ -4,6 +4,8 @@ import "./App.css";
 
 const API_BASE = "http://localhost:4000/api";
 const POLLO_PIPELINE_URL = "http://localhost:5173/";
+// Use queue.fal.run for model API calls (submit/poll jobs)
+// api.fal.ai is only for Platform APIs (OpenAPI schema, SDK generation)
 const FAL_AI_API_BASE =
   import.meta.env.VITE_FAL_AI_API_BASE || "https://queue.fal.run";
 
