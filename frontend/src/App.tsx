@@ -967,6 +967,7 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
         console.log("Model:", falModel);
 
         const res = await fetch(pollUrl, {
+          method: "POST",
           headers: {
             Accept: "application/json",
             Authorization: `Key ${falApiKey}`,

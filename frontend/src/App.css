@@ -3,11 +3,12 @@
   max-width: 100%;
   margin: 0;
   padding: 1.5rem;
+  padding-top: 4rem;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   box-sizing: border-box;
 }
 
-h1 { margin-bottom: 1rem; }
+h1 { margin-bottom: 0.5rem; }
 
 .form {
   display: grid;
@@ -88,26 +89,30 @@ th:hover { background: #e5e7eb; }
 .back-link:hover { text-decoration: underline; }
 
 .provider-grid {
-  display: flex;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
   gap: 1rem;
-  margin-top: 1.5rem;
+  margin-top: 0.75rem;
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
 }
 
+@media (max-width: 1200px) {
+  .provider-grid {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+}
+
 .provider-card {
   border: 1px solid #e5e7eb;
   border-radius: 12px;
-  padding: 1.25rem;
+  padding: 0.875rem;
   background: #fff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
   cursor: pointer;
-  aspect-ratio: 1;
-  height: 80%;
-  flex: 1;
+  display: flex;
   flex-direction: column;
 }
 .provider-card:hover {
@@ -119,11 +124,19 @@ th:hover { background: #e5e7eb; }
   outline-offset: 2px;
 }
 
+.provider-card p {
+  margin: 0;
+  color: #374151;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  flex: 1;
+}
+
 .provider-card-title {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
 }
 .provider-card-title h2 {
   margin: 0;
@@ -147,7 +160,8 @@ th:hover { background: #e5e7eb; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 1.2rem;
+  margin-top: auto;
+  padding-top: 0.5rem;
   font-size: 0.88rem;
   color: #6b7280;
 }
