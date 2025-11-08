@@ -788,17 +788,40 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
     "fal-ai/ltxv-2/text-to-video", // LTX Video 2.0 Pro - Up to 4K, with audio
     "fal-ai/fast-animatediff/text-to-video", // AnimateDiff - Fast text-to-video
     "fal-ai/wan/v2.2-a14b/image-to-video", // WAN v2.2 A14B - Image to Video
-    "fal-ai/runway-gen2/image-to-video", // Runway Gen-2 - Image to Video
     "fal-ai/minimax-video", // MiniMax Video - Generate video clips from images
     "fal-ai/luma-dream-machine", // Luma Dream Machine v1.5 - Generate video clips from images
     "fal-ai/kling-video/v1/standard", // Kling 1.0 - Generate video clips from images
   ];
   const [falModel, setFalModel] = useState(FAL_AI_MODELS[0]);
   const [falApiKey] = useState(import.meta.env.VITE_FAL_API_KEY || ""); // FAL_API_KEY from .env
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobs, setJobs] = useState<Job[]>(() => {
+    // Load jobs from localStorage on initial mount
+    try {
+      const saved = localStorage.getItem("fal-ai-jobs");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        console.log(`Loaded ${parsed.length} Fal AI jobs from localStorage`);
+        return parsed;
+      }
+    } catch (error) {
+      console.error("Failed to load jobs from localStorage:", error);
+    }
+    return [];
+  });
   const [polling, setPolling] = useState<Record<string, boolean>>({});
+  const [lastPollTime, setLastPollTime] = useState<Record<string, number>>({});
   const [promptImage, setPromptImage] = useState<string>("");
   const [promptImageName, setPromptImageName] = useState<string>("");
+
+  // Save jobs to localStorage whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem("fal-ai-jobs", JSON.stringify(jobs));
+      console.log(`Saved ${jobs.length} Fal AI jobs to localStorage`);
+    } catch (error) {
+      console.error("Failed to save jobs to localStorage:", error);
+    }
+  }, [jobs]);
 
   // Log environment variables on mount
   useEffect(() => {
@@ -821,7 +844,35 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
     );
     console.log("All import.meta.env keys:", Object.keys(import.meta.env));
     console.log("Current model:", falModel);
+    console.log(`Loaded ${jobs.length} jobs from localStorage`);
   }, []);
+
+  // Restart polling for any existing queued or running jobs
+  useEffect(() => {
+    const restartPollingForJobs = () => {
+      const queuedOrRunning = jobs.filter(
+        (job) => job.status === "queued" || job.status === "running"
+      );
+      console.log(
+        `Found ${queuedOrRunning.length} queued/running jobs out of ${jobs.length} total`
+      );
+
+      queuedOrRunning.forEach((job) => {
+        if (!polling[job.id]) {
+          console.log(
+            `🔄 Restarting polling for job ${job.id} (status: ${job.status})`
+          );
+          startPolling(job.id);
+        } else {
+          console.log(`⏸️  Polling already active for job ${job.id}`);
+        }
+      });
+    };
+
+    // Check immediately on mount and when jobs change
+    restartPollingForJobs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs.length]); // Only restart when jobs are added, not on every render
 
   const isImageToVideoModel =
     falModel.includes("image-to-video") ||
@@ -922,7 +973,19 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
         return;
       }
 
-      console.log("Success! Request ID:", data.request_id);
+      // Validate that we got a request_id
+      if (!data.request_id) {
+        console.error("❌ Fal AI did not return a request_id:", data);
+        alert(
+          `Error: Fal AI did not return a job ID. Response: ${JSON.stringify(
+            data
+          )}`
+        );
+        return;
+      }
+
+      console.log("✅ Success! Request ID:", data.request_id);
+      console.log("Full response:", JSON.stringify(data, null, 2));
 
       const newJob: Job = {
         id: data.request_id,
@@ -933,9 +996,11 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
         createdAt: new Date().toISOString(),
         lengthSeconds: null,
         videoUrl: null,
+        model: falModel, // Store the model used for this job
       };
       setJobs((prev) => [newJob, ...prev]);
-      startPolling(newJob.id);
+      console.log(`📝 Created job ${data.request_id}, starting polling...`);
+      startPolling(newJob.id, falModel);
     } catch (error) {
       console.error("=== Error generating video with Fal AI ===");
       console.error("Error object:", error);
@@ -955,17 +1020,27 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const startPolling = (jobId: string) => {
+  const startPolling = (jobId: string, modelOverride?: string) => {
     if (polling[jobId]) return;
     setPolling((p) => ({ ...p, [jobId]: true }));
 
+    // Use the model from the job if available, otherwise use current model
+    const job = jobs.find((j) => j.id === jobId);
+    const modelToUse = modelOverride || (job?.model as string) || falModel;
+
     const tick = async () => {
       try {
-        const pollUrl = `${FAL_AI_API_BASE}/${falModel}/${jobId}`;
+        // Fal AI status endpoint uses POST (not GET)
+        // Fal AI polling endpoint: POST to /{model}/{request_id}
+        const pollUrl = `${FAL_AI_API_BASE}/${modelToUse}/${jobId}`;
         console.log(`=== Polling Fal AI Job ${jobId} ===`);
         console.log("Poll URL:", pollUrl);
-        console.log("Model:", falModel);
+        console.log("Model:", modelToUse);
+        console.log("API Key present:", !!falApiKey);
+        console.log("API Key length:", falApiKey?.length || 0);
 
+        // Fal AI status endpoint ONLY accepts POST (not GET)
+        // Response headers show: Allow: OPTIONS, POST
         const res = await fetch(pollUrl, {
           method: "POST",
           headers: {
@@ -974,8 +1049,52 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
           },
         });
 
+        console.log("Poll HTTP Status:", res.status, res.statusText);
+        setLastPollTime((prev) => ({ ...prev, [jobId]: Date.now() }));
+
         console.log("Poll Response Status:", res.status);
         console.log("Poll Response Status Text:", res.statusText);
+
+        // Handle HTTP errors
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error(
+            `HTTP Error ${res.status} for job ${jobId}:`,
+            errorText
+          );
+
+          // If it's a 404, the job doesn't exist (expired, deleted, or invalid)
+          if (res.status === 404) {
+            console.error(
+              `❌ Job ${jobId} not found on Fal AI - marking as failed`
+            );
+            setJobs((prev) =>
+              prev.map((job) =>
+                job.id === jobId
+                  ? {
+                      ...job,
+                      status: "failed" as const,
+                      error:
+                        "Job not found on Fal AI (may have expired or been deleted)",
+                    }
+                  : job
+              )
+            );
+            setPolling((p) => {
+              const next = { ...p };
+              delete next[jobId];
+              return next;
+            });
+            return; // Stop polling for this job
+          } else {
+            // For other errors, retry after a longer delay
+            console.log(
+              `Retrying job ${jobId} after error, will poll again in 10s`
+            );
+            setTimeout(tick, 10000);
+          }
+          return;
+        }
 
         const responseText = await res.text();
         console.log("Poll Response Body (raw):", responseText);
@@ -998,17 +1117,51 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
           return;
         }
 
+        // Handle error responses from Fal AI
+        if (data.error || data.detail) {
+          console.error(
+            `Fal AI error for job ${jobId}:`,
+            data.error || data.detail
+          );
+          setJobs((prev) =>
+            prev.map((job) =>
+              job.id === jobId ? { ...job, status: "failed" as const } : job
+            )
+          );
+          setPolling((p) => {
+            const next = { ...p };
+            delete next[jobId];
+            return next;
+          });
+          return;
+        }
+
         setJobs((prev) => {
           return prev.map((job) => {
             if (job.id === jobId) {
               let status: Job["status"] = "queued";
               let videoUrl: string | null = null;
 
-              if (data.status === "IN_QUEUE") {
+              // Handle various status formats (case-insensitive)
+              const statusStr = String(data.status || "").toUpperCase();
+
+              if (
+                statusStr === "IN_QUEUE" ||
+                statusStr === "QUEUED" ||
+                statusStr === "PENDING"
+              ) {
                 status = "queued";
-              } else if (data.status === "RUNNING") {
+              } else if (
+                statusStr === "RUNNING" ||
+                statusStr === "PROCESSING" ||
+                statusStr === "IN_PROGRESS"
+              ) {
                 status = "running";
-              } else if (data.status === "COMPLETED") {
+              } else if (
+                statusStr === "COMPLETED" ||
+                statusStr === "SUCCEEDED" ||
+                statusStr === "DONE"
+              ) {
                 status = "succeeded";
                 // Fal AI text-to-video models return video URL in different structures
                 videoUrl =
@@ -1017,8 +1170,16 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
                   data.video?.url ||
                   data.url ||
                   null;
-              } else if (data.status === "FAILED") {
+              } else if (
+                statusStr === "FAILED" ||
+                statusStr === "ERROR" ||
+                statusStr === "ERRORED"
+              ) {
                 status = "failed";
+              } else if (statusStr) {
+                // Unknown status, log it but keep polling
+                console.warn(`Unknown status for job ${jobId}: ${statusStr}`);
+                status = "queued"; // Default to queued for unknown statuses
               }
 
               return { ...job, status, videoUrl };
@@ -1034,14 +1195,27 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
           data.url ||
           null;
 
-        if (data.status === "IN_QUEUE" || data.status === "RUNNING") {
+        const statusStr = String(data.status || "").toUpperCase();
+        const shouldContinuePolling =
+          statusStr === "IN_QUEUE" ||
+          statusStr === "QUEUED" ||
+          statusStr === "PENDING" ||
+          statusStr === "RUNNING" ||
+          statusStr === "PROCESSING" ||
+          statusStr === "IN_PROGRESS";
+
+        if (shouldContinuePolling) {
           console.log(
             `Job ${jobId} status: ${data.status}, will poll again in 3s`
           );
           setTimeout(tick, 3000);
         } else {
           console.log(`Job ${jobId} completed with status: ${data.status}`);
-          if (data.status === "COMPLETED") {
+          if (
+            statusStr === "COMPLETED" ||
+            statusStr === "SUCCEEDED" ||
+            statusStr === "DONE"
+          ) {
             console.log("Video URL:", finalVideoUrl);
           }
           setPolling((p) => {
@@ -1179,13 +1353,195 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
           </div>
         )}
 
-        <button onClick={handleGenerate}>Generate Fal AI Video</button>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <button onClick={handleGenerate}>Generate Fal AI Video</button>
+          <button
+            type="button"
+            onClick={async () => {
+              if (!falApiKey) {
+                alert("Fal AI API Key is not set in .env");
+                return;
+              }
+
+              // Test connection with a simple model check
+              try {
+                const testUrl = `${FAL_AI_API_BASE}/fal-ai/wan-t2v/submit`;
+                console.log("=== Testing Fal AI Connection ===");
+                console.log("Test URL:", testUrl);
+                console.log("API Key present:", !!falApiKey);
+                console.log("API Key length:", falApiKey.length);
+
+                const testRes = await fetch(testUrl, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Key ${falApiKey}`,
+                  },
+                  body: JSON.stringify({
+                    prompt: "test",
+                    sync_mode: "async",
+                  }),
+                });
+
+                const testText = await testRes.text();
+                console.log("Test Response Status:", testRes.status);
+                console.log("Test Response:", testText);
+
+                if (testRes.ok) {
+                  const testData = JSON.parse(testText);
+                  alert(
+                    `✅ Connection successful! Request ID: ${testData.request_id}`
+                  );
+                } else {
+                  alert(
+                    `❌ Connection failed: ${testRes.status} - ${testText}`
+                  );
+                }
+              } catch (error) {
+                console.error("Connection test error:", error);
+                alert(
+                  `❌ Connection test failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`
+                );
+              }
+            }}
+            style={{ fontSize: "0.9em", padding: "0.5rem 1rem" }}
+          >
+            Test Connection
+          </button>
+        </div>
       </section>
 
       <section className="jobs">
         <div className="jobs-header">
           <h2>Jobs</h2>
-          <button onClick={() => setJobs([])}>Clear Jobs</button>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button
+              onClick={async () => {
+                // Force refresh status for all jobs
+                console.log("=== Manual Refresh Status ===");
+                for (const job of jobs) {
+                  if (job.status === "queued" || job.status === "running") {
+                    const jobModel = (job.model as string) || falModel;
+                    const pollUrl = `${FAL_AI_API_BASE}/${jobModel}/${job.id}`;
+
+                    try {
+                      // Fal AI status endpoint ONLY accepts POST (not GET)
+                      const res = await fetch(pollUrl, {
+                        method: "POST",
+                        headers: {
+                          Accept: "application/json",
+                          Authorization: `Key ${falApiKey}`,
+                        },
+                      });
+
+                      if (!res.ok) {
+                        console.error(`HTTP ${res.status} for job ${job.id}`);
+                        if (res.status === 404) {
+                          console.error(
+                            `❌ Job ${job.id} not found on Fal AI - marking as failed`
+                          );
+                          setJobs((prev) =>
+                            prev.map((j) =>
+                              j.id === job.id
+                                ? {
+                                    ...j,
+                                    status: "failed" as const,
+                                    error:
+                                      "Job not found on Fal AI (may have expired or been deleted)",
+                                  }
+                                : j
+                            )
+                          );
+                        }
+                        continue;
+                      }
+
+                      const data = await res.json();
+                      console.log(`Job ${job.id} status:`, data.status);
+
+                      if (data.error || data.detail) {
+                        setJobs((prev) =>
+                          prev.map((j) =>
+                            j.id === job.id
+                              ? { ...j, status: "failed" as const }
+                              : j
+                          )
+                        );
+                        continue;
+                      }
+
+                      const statusStr = String(data.status || "").toUpperCase();
+                      let newStatus: Job["status"] = "queued";
+                      let videoUrl: string | null = null;
+
+                      if (
+                        statusStr === "IN_QUEUE" ||
+                        statusStr === "QUEUED" ||
+                        statusStr === "PENDING"
+                      ) {
+                        newStatus = "queued";
+                      } else if (
+                        statusStr === "RUNNING" ||
+                        statusStr === "PROCESSING" ||
+                        statusStr === "IN_PROGRESS"
+                      ) {
+                        newStatus = "running";
+                      } else if (
+                        statusStr === "COMPLETED" ||
+                        statusStr === "SUCCEEDED" ||
+                        statusStr === "DONE"
+                      ) {
+                        newStatus = "succeeded";
+                        videoUrl =
+                          data.output?.video?.url ||
+                          data.output?.url ||
+                          data.video?.url ||
+                          data.url ||
+                          null;
+                      } else if (
+                        statusStr === "FAILED" ||
+                        statusStr === "ERROR" ||
+                        statusStr === "ERRORED"
+                      ) {
+                        newStatus = "failed";
+                      }
+
+                      setJobs((prev) =>
+                        prev.map((j) =>
+                          j.id === job.id
+                            ? { ...j, status: newStatus, videoUrl }
+                            : j
+                        )
+                      );
+
+                      // Restart polling if still queued/running
+                      if (
+                        (newStatus === "queued" || newStatus === "running") &&
+                        !polling[job.id]
+                      ) {
+                        startPolling(job.id);
+                      }
+                    } catch (error) {
+                      console.error(`Error refreshing job ${job.id}:`, error);
+                    }
+                  }
+                }
+              }}
+            >
+              Refresh Status
+            </button>
+            <button
+              onClick={() => {
+                setJobs([]);
+                localStorage.removeItem("fal-ai-jobs");
+                console.log("Cleared all Fal AI jobs from localStorage");
+              }}
+            >
+              Clear Jobs
+            </button>
+          </div>
         </div>
 
         <table>
@@ -1203,8 +1559,30 @@ function FalAiPanel({ onBack }: { onBack: () => void }) {
             {sortedJobs.map((job) => (
               <tr key={job.id}>
                 <td>{job.engineId}</td>
-                <td>{falModel}</td>
-                <td>{job.status}</td>
+                <td>{(job.model as string) || falModel}</td>
+                <td>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.25rem",
+                    }}
+                  >
+                    <span>{job.status}</span>
+                    {polling[job.id] && (
+                      <span style={{ fontSize: "0.75em", opacity: 0.7 }}>
+                        Polling...
+                      </span>
+                    )}
+                    {lastPollTime[job.id] && (
+                      <span style={{ fontSize: "0.75em", opacity: 0.6 }}>
+                        Last check:{" "}
+                        {Math.floor((Date.now() - lastPollTime[job.id]) / 1000)}
+                        s ago
+                      </span>
+                    )}
+                  </div>
+                </td>
                 <td title={job.prompt}>
                   {job.prompt.length > 48
                     ? `${job.prompt.slice(0, 48)}...`
